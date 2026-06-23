@@ -297,6 +297,22 @@
           </div>
         </div>
 
+        <!-- プロンプトプリセット -->
+        <div class="settings-item">
+          <label><i data-lucide="sparkles" style="width:14px;height:14px"></i> 要約スタイル</label>
+          <select id="select-prompt-preset">
+            <option value="compact">🗜 コンパクト — 核心だけ3〜5箇条</option>
+            <option value="balanced">📋 バランス — 内容をほぼ拾いつつ箇条書き</option>
+            <option value="detailed">📄 詳細 — 話の流れを保ちながら整形</option>
+            <option value="custom">✏️ カスタム — 自由入力</option>
+          </select>
+        </div>
+        <div class="settings-item" id="custom-prompt-area" style="display:none">
+          <label><i data-lucide="edit-3" style="width:14px;height:14px"></i> カスタムプロンプト</label>
+          <textarea id="input-custom-prompt" style="min-height:140px;font-size:0.85rem"></textarea>
+          <span class="hint">音声メモのテキストは末尾に自動で追加されます</span>
+        </div>
+
         <!-- テンプレート -->
         <div class="settings-item">
           <label><i data-lucide="layout-template" style="width:14px;height:14px"></i> 追記テンプレート</label>
@@ -325,13 +341,50 @@
 
     // ── 設定 ──────────────────────────────────────────
     const STORAGE_KEY = 'voxscribe_v1';
+    const PROMPTS = {
+      compact: `あなたは思考整理の専門家です。以下の音声メモを、核心だけを抽出した箇条書きにしてください。
+
+ルール：
+- 最も重要なアイデア・気づきだけを3〜5項目に絞る
+- 各項目は1文で簡潔に
+- 感情・直感・違和感も価値ある情報として残す
+- 話し言葉のノイズ（えーと、あの、など）は除去する
+- 箇条書き（- ）のみを出力。前置き・まとめ・解説は一切不要
+
+音声メモ:`,
+
+      balanced: `あなたは思考整理の専門家です。以下の音声メモのアイデア・気づき・思考の断片を整理し、思考の核心が伝わる箇条書きにしてください。
+
+ルール：
+- アイデアや着想の「本質」を短く言語化する
+- 思考のつながりや因果関係があれば保持する
+- 感情・直感・違和感なども価値ある情報として残す
+- 話し言葉のノイズ（えーと、あの、など）は除去する
+- 箇条書き（- ）のみを出力。前置き・まとめ・解説は一切不要
+
+音声メモ:`,
+
+      detailed: `あなたは思考整理の専門家です。以下の音声メモの内容をできるだけ拾い、話の流れや文脈を保ちながら箇条書きに整形してください。
+
+ルール：
+- 話した内容をほぼ網羅的に拾う（省略は最小限）
+- 話の流れ・順序・因果関係を保持する
+- 感情・直感・違和感・具体例もそのまま残す
+- 話し言葉のノイズ（えーと、あの、など）のみ除去する
+- 箇条書き（- ）のみを出力。前置き・まとめ・解説は一切不要
+
+音声メモ:`
+    };
+
     const DEFAULTS = {
       geminiKey: '',
       geminiModel: 'gemini-2.5-flash',
       obsidianKey: '',
       obsidianHost: '127.0.0.1',
       obsidianPort: '27124',
-      obsidianTemplate: '\n\n### 🎤 音声メモ ({{time}})\n{{content}}'
+      obsidianTemplate: '\n\n### 🎤 音声メモ ({{time}})\n{{content}}',
+      promptPreset: 'balanced',
+      customPrompt: ''
     };
 
     let cfg = { ...DEFAULTS };
@@ -352,6 +405,8 @@
       cfg.obsidianHost = document.getElementById('input-obsidian-host').value.trim() || '127.0.0.1';
       cfg.obsidianPort = document.getElementById('input-obsidian-port').value.trim() || '27124';
       cfg.obsidianTemplate = document.getElementById('input-obsidian-template').value;
+      cfg.promptPreset     = document.getElementById('select-prompt-preset').value;
+      cfg.customPrompt     = document.getElementById('input-custom-prompt').value;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
       syncSettingsUI();
       showToast('設定を保存しました', 'success');
@@ -365,6 +420,9 @@
       document.getElementById('input-obsidian-host').value     = cfg.obsidianHost;
       document.getElementById('input-obsidian-port').value     = cfg.obsidianPort;
       document.getElementById('input-obsidian-template').value = cfg.obsidianTemplate;
+      document.getElementById('select-prompt-preset').value    = cfg.promptPreset;
+      document.getElementById('input-custom-prompt').value     = cfg.customPrompt;
+      document.getElementById('custom-prompt-area').style.display = cfg.promptPreset === 'custom' ? 'flex' : 'none';
       const link = document.getElementById('obsidian-cert-link');
       link.href = link.innerText = `https://${cfg.obsidianHost}:${cfg.obsidianPort}/`;
     }
@@ -494,23 +552,19 @@
     }
 
     // ── Gemini API ────────────────────────────────────
+    function buildPrompt(text) {
+      if (cfg.promptPreset === 'custom') {
+        return (cfg.customPrompt || PROMPTS.balanced) + '\n' + text;
+      }
+      return (PROMPTS[cfg.promptPreset] || PROMPTS.balanced) + '\n' + text;
+    }
+
     async function summarizeWithGemini(text) {
       if (!cfg.geminiKey) {
         showToast('Gemini APIキーが設定されていません', 'error');
         openSettings(); return null;
       }
-      const prompt = `あなたは思考整理の専門家です。以下の音声メモには、話し手のアイデア・気づき・思考の断片が含まれています。
-これらを整理し、思考の核心が伝わる箇条書きにしてください。
-
-ルール：
-- アイデアや着想の「本質」を短く言語化する
-- 思考のつながりや因果関係があれば保持する
-- 感情・直感・違和感なども価値ある情報として残す
-- 話し言葉のノイズ（えーと、あの、など）は除去する
-- 箇条書き（- ）のみを出力する。前置き・まとめ・解説は一切不要
-
-音声メモ:
-${text}`;
+      const prompt = buildPrompt(text);
 
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${cfg.geminiModel}:generateContent?key=${cfg.geminiKey}`;
       try {
@@ -606,6 +660,10 @@ ${text}`;
     });
 
     document.getElementById('transcript-accordion').addEventListener('click', function() { this.classList.toggle('open'); });
+
+    document.getElementById('select-prompt-preset').addEventListener('change', function() {
+      document.getElementById('custom-prompt-area').style.display = this.value === 'custom' ? 'flex' : 'none';
+    });
 
     document.getElementById('btn-test-gemini').addEventListener('click', async () => {
       const key = document.getElementById('input-gemini-key').value.trim();
